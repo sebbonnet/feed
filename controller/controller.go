@@ -14,7 +14,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/sky-uk/feed/k8s"
 	"github.com/sky-uk/feed/util"
-	v1 "k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/api/v1"
+	"k8s.io/client-go/pkg/apis/extensions/v1beta1"
 )
 
 const (
@@ -36,6 +37,8 @@ const (
 
 	// sets Nginx (http://nginx.org/en/docs/http/ngx_http_upstream_module.html#max_conns)
 	backendMaxConnections = "sky.uk/backend-max-connections"
+
+	ingressNameAnnotation = "sky.uk/ingress-name"
 )
 
 // Controller operates on ingress resources, listening for updates and notifying its Updaters.
@@ -63,6 +66,8 @@ type controller struct {
 	started                      bool
 	updatesHealth                util.SafeError
 	sync.Mutex
+	mainIngress bool
+	ingressName string
 }
 
 // Config for creating a new ingress controller.
@@ -75,6 +80,8 @@ type Config struct {
 	DefaultBackendMaxConnections int
 	DefaultProxyBufferSize       int
 	DefaultProxyBufferBlocks     int
+	MainIngress                  bool
+	IngressName                  string
 }
 
 // New creates an ingress controller.
@@ -89,6 +96,8 @@ func New(conf Config) Controller {
 		defaultProxyBufferSize:       conf.DefaultProxyBufferSize,
 		defaultProxyBufferBlocks:     conf.DefaultProxyBufferBlocks,
 		doneCh:                       make(chan struct{}),
+		mainIngress:                  conf.MainIngress,
+		ingressName:                  conf.IngressName,
 	}
 }
 
@@ -172,7 +181,12 @@ func (c *controller) updateIngresses() error {
 
 				serviceName := serviceName{namespace: ingress.Namespace, name: path.Backend.ServiceName}
 
-				if address := serviceMap[serviceName]; address != "" {
+				if address := serviceMap[serviceName]; address == "" {
+					skipped = append(skipped, fmt.Sprintf("%s/%s (service doesn't exist)", ingress.Namespace, ingress.Name))
+				} else if !c.validIngressName(ingress) {
+					skipped = append(skipped, fmt.Sprintf("%s/%s (ingress name [%s] is not valid. Config: [%s])",
+						ingress.Namespace, ingress.Name, ingress.Annotations[ingressNameAnnotation], c.ingressName))
+				} else {
 					entry := IngressEntry{
 						Namespace:             ingress.Namespace,
 						Name:                  ingress.Name,
@@ -188,6 +202,7 @@ func (c *controller) updateIngresses() error {
 						ProxyBufferBlocks:     c.defaultProxyBufferBlocks,
 						CreationTimestamp:     ingress.CreationTimestamp.Time,
 						Ingress:               ingress,
+						IngressName:           ingress.Annotations[ingressNameAnnotation],
 					}
 
 					log.Debugf("Found ingress to update: %s", ingress.Name)
@@ -254,8 +269,6 @@ func (c *controller) updateIngresses() error {
 					} else {
 						skipped = append(skipped, fmt.Sprintf("%s (%v)", entry.NamespaceName(), err))
 					}
-				} else {
-					skipped = append(skipped, fmt.Sprintf("%s/%s (service doesn't exist)", ingress.Namespace, ingress.Name))
 				}
 			}
 		}
@@ -273,6 +286,19 @@ func (c *controller) updateIngresses() error {
 	}
 
 	return nil
+}
+
+func (c *controller) validIngressName(ingress *v1beta1.Ingress) bool {
+
+	isValid := false
+
+	if ingressName, ok := ingress.Annotations[ingressNameAnnotation]; ok {
+		isValid = ingressName == c.ingressName
+	} else if c.mainIngress {
+		isValid = true
+	}
+
+	return isValid
 }
 
 type serviceName struct {
