@@ -65,6 +65,7 @@ docker : build
 
 release : docker
 	@echo "== release docker images"
+	@echo "== TEST == $(DOCKER_USERNAME) =="
 ifeq ($(strip $(git_tag)),)
 	@echo "no tag on $(git_rev), skipping release"
 else
